@@ -49,12 +49,34 @@ function guardarTodo() {
         localStorage.setItem(STORAGE_CLIENTES, JSON.stringify(clientes));
         localStorage.setItem(STORAGE_PROVEEDORES, JSON.stringify(proveedores));
         localStorage.setItem(STORAGE_RECORDATORIOS_GENERALES, JSON.stringify(recordatoriosGenerales));
+        sincronizarConSheets(); // best-effort: si falla, no rompe el guardado local (ver función abajo)
         return true;
     } catch (e) {
         console.error('Error guardando en localStorage:', e);
         alert('No se pudo guardar: el navegador quedó sin espacio de almacenamiento. Esto suele pasar por acumular muchas fotos. Borrá alguna foto vieja de un pedido y volvé a intentar.');
         return false;
     }
+}
+
+// ==========================================================================
+// SINCRONIZACIÓN CON GOOGLE SHEETS (para el resumen semanal automático)
+// Pegá acá la URL que te da Apps Script al "Implementar como Aplicación Web"
+// (termina en /exec). Mientras esté vacía, esto simplemente no hace nada.
+// ==========================================================================
+const APPS_SCRIPT_URL = ''; // <-- PEGAR ACÁ LA URL, ej: 'https://script.google.com/macros/s/AKfycb.../exec'
+
+function sincronizarConSheets() {
+    if (!APPS_SCRIPT_URL) return; // todavía no se configuró, no hacemos nada
+    const resumen = generarTextoResumenPendientes();
+    fetch(APPS_SCRIPT_URL, {
+        method: 'POST',
+        // OJO: "text/plain" es a propósito, no un error. Si ponemos "application/json"
+        // el navegador manda antes un pedido OPTIONS (preflight) que Apps Script no
+        // responde bien, y la sincronización falla silenciosamente. Con text/plain se
+        // evita ese preflight y Apps Script igual puede parsear el JSON del body.
+        headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify({ resumen })
+    }).catch(err => console.warn('No se pudo sincronizar con Google Sheets (revisá la URL o la conexión):', err));
 }
 
 // Migración automática desde la v1 (donde el cliente vivía embebido en el pedido
@@ -1276,13 +1298,162 @@ window.importarBackup = function(inputEl) {
 };
 
 // ==========================================================================
+// IMPORTAR PEDIDOS DESDE EXCEL / CSV
+// ==========================================================================
+const COLUMNAS_PLANTILLA = ['Cliente', 'Telefono', 'Email', 'Origen', 'Tipo', 'Modelo', 'TipoMueble', 'Madera', 'Medidas', 'Tela', 'Color', 'PrecioTotal', 'MontoPagado', 'Etapa', 'FechaConsulta', 'FechaEstimada', 'FechaReal'];
+
+window.descargarPlantillaImportacion = function() {
+    const ejemplo1 = ['Juan Pérez', '2235551234', '', 'Instagram', 'Sillon', 'NALA', '', '', '2,00m x 1,00m', 'DONN', 'GRIS', '1800000', '900000', 'entregado', '2026-01-15', '2026-02-10', '2026-02-08'];
+    const ejemplo2 = ['Ana López', '2235555678', '', 'Recomendación', 'Mueble', '', 'Mesa Ratona', 'PETIRIBI', '120x60x45cm', '', '', '600000', '300000', 'produccion', '2026-03-01', '2026-03-25', ''];
+    const csv = [COLUMNAS_PLANTILLA, ejemplo1, ejemplo2].map(fila => fila.map(v => `"${String(v).replace(/"/g, '""')}"`).join(';')).join('\r\n');
+    descargarArchivo('plantilla-importacion-pedidos.csv', '\ufeff' + csv, 'text/csv;charset=utf-8;');
+};
+
+function normalizarEtapaImportada(valor) {
+    const v = String(valor || '').toLowerCase().trim();
+    const match = ETAPAS.find(e => e.key === v || e.label.toLowerCase() === v);
+    return match ? match.key : 'consulta';
+}
+function normalizarTipoImportado(valor) {
+    return String(valor || '').toLowerCase().includes('mueble') ? 'mueble' : 'sillon';
+}
+function parseFechaImportada(valor) {
+    if (!valor) return '';
+    if (valor instanceof Date) return valor.toISOString().substring(0, 10);
+    const str = String(valor).trim();
+    if (/^\d{4}-\d{2}-\d{2}/.test(str)) return str.substring(0, 10);
+    const partes = str.split(/[\/\-]/);
+    if (partes.length === 3 && partes[2].length === 4) {
+        const [d, m, y] = partes;
+        return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+    return '';
+}
+
+function procesarFilasImportadas(filas) {
+    let pedidosNuevos = 0, clientesNuevos = 0;
+    const nuevosPedidos = [];
+    filas.forEach(fila => {
+        const nombreCliente = String(fila['Cliente'] || '').trim();
+        if (!nombreCliente) return; // fila sin cliente, se ignora
+
+        let cliente = clientes.find(c => c.nombre.toLowerCase() === nombreCliente.toLowerCase());
+        if (!cliente) {
+            cliente = {
+                id: generarId(), nombre: nombreCliente,
+                telefono: String(fila['Telefono'] || '').trim(), email: String(fila['Email'] || '').trim(),
+                direccion: '', origen: String(fila['Origen'] || '').trim(),
+                notasGenerales: [], createdAt: new Date().toISOString()
+            };
+            clientes.push(cliente);
+            clientesNuevos++;
+        }
+
+        const montoPagado = parseFloat(fila['MontoPagado']) || 0;
+        const fechaConsulta = parseFechaImportada(fila['FechaConsulta']);
+
+        nuevosPedidos.push({
+            id: generarId(), clienteId: cliente.id, tipo: normalizarTipoImportado(fila['Tipo']),
+            modelo: String(fila['Modelo'] || '').toUpperCase().trim(),
+            tipoMueble: String(fila['TipoMueble'] || '').trim(),
+            madera: String(fila['Madera'] || '').toUpperCase().trim(),
+            medidas: String(fila['Medidas'] || '').trim(),
+            tela: String(fila['Tela'] || '').trim(),
+            color: String(fila['Color'] || '').trim(),
+            precioTotal: parseFloat(fila['PrecioTotal']) || 0,
+            pagos: montoPagado > 0 ? [{ fecha: fechaConsulta || new Date().toISOString().substring(0, 10), monto: montoPagado, medio: 'Importado' }] : [],
+            costos: [], recordatorios: [], notas: [], fotos: [],
+            etapa: normalizarEtapaImportada(fila['Etapa']),
+            fechaConsulta, fechaEstimada: parseFechaImportada(fila['FechaEstimada']), fechaReal: parseFechaImportada(fila['FechaReal']),
+            createdAt: new Date().toISOString()
+        });
+        pedidosNuevos++;
+    });
+    return { pedidosNuevos, clientesNuevos, aplicar: () => pedidos.push(...nuevosPedidos) };
+}
+
+window.importarPedidosExcel = function(inputEl) {
+    const file = inputEl.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        try {
+            const data = new Uint8Array(e.target.result);
+            const workbook = XLSX.read(data, { type: 'array', cellDates: true });
+            const filas = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { defval: '' });
+            if (filas.length === 0) { alert('El archivo no tiene filas para importar.'); inputEl.value = ''; return; }
+            const resultado = procesarFilasImportadas(filas);
+            if (resultado.pedidosNuevos === 0) { alert('No se encontró ninguna fila con la columna "Cliente" completa. Revisá que el archivo siga la plantilla.'); inputEl.value = ''; return; }
+            if (!confirm(`Se van a crear ${resultado.pedidosNuevos} pedido(s) y ${resultado.clientesNuevos} cliente(s) nuevo(s). ¿Confirmás la importación?`)) { inputEl.value = ''; return; }
+            resultado.aplicar();
+            if (!guardarTodo()) return;
+            renderTodo();
+            alert('Importación completada.');
+        } catch (err) {
+            console.error(err);
+            alert('No se pudo leer el archivo. Verificá que sea un Excel o CSV válido y que respete las columnas de la plantilla.');
+        }
+        inputEl.value = '';
+    };
+    reader.readAsArrayBuffer(file);
+};
+
+// ==========================================================================
+// SUPABASE — CONEXIÓN Y AUTENTICACIÓN REAL
+// ==========================================================================
+const SUPABASE_URL = 'https://rqvynuonbeqjrkebmynj.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_n1XeAFd-R2puy7ElLRAywg_5-bK_4yp';
+const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+window.intentarIngresar = async function() {
+    const email = document.getElementById('gate-email').value.trim();
+    const password = document.getElementById('gate-password').value;
+    const boton = document.getElementById('gate-btn');
+    const error = document.getElementById('gate-error');
+    error.style.display = 'none';
+    boton.textContent = 'Ingresando...';
+    boton.disabled = true;
+
+    const { error: errorLogin } = await supabaseClient.auth.signInWithPassword({ email, password });
+
+    boton.textContent = 'Ingresar';
+    boton.disabled = false;
+
+    if (errorLogin) {
+        error.style.display = 'block';
+        return;
+    }
+    document.getElementById('gate-overlay').style.display = 'none';
+    iniciarApp();
+};
+
+window.cerrarSesion = async function() {
+    if (!confirm('¿Cerrar sesión?')) return;
+    await supabaseClient.auth.signOut();
+    location.reload();
+};
+
+// ==========================================================================
 // INIT
 // ==========================================================================
-cargarTodo();
-migrarDesdeV1SiHaceFalta();
-if (pedidos.length === 0 && clientes.length === 0 && proveedores.length === 0) {
-    if (confirm('No hay datos cargados todavía. ¿Querés cargar datos de ejemplo para probar el CRM?')) {
-        cargarDatosDeEjemplo();
+function iniciarApp() {
+    cargarTodo();
+    migrarDesdeV1SiHaceFalta();
+    if (pedidos.length === 0 && clientes.length === 0 && proveedores.length === 0) {
+        if (confirm('No hay datos cargados todavía. ¿Querés cargar datos de ejemplo para probar el CRM?')) {
+            cargarDatosDeEjemplo();
+        }
     }
+    renderTodo();
 }
-renderTodo();
+
+// Supabase Auth guarda la sesión sola (en su propio storage, con tokens que
+// vencen y se renuevan solos) — por eso alcanza con preguntarle "¿ya hay
+// alguien logueado?" en vez de manejar nosotros ninguna bandera a mano.
+supabaseClient.auth.getSession().then(({ data: { session } }) => {
+    if (session) {
+        document.getElementById('gate-overlay').style.display = 'none';
+        iniciarApp();
+    }
+    // Si no hay sesión, el overlay se queda tapando todo hasta que se loguee.
+});
