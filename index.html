@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pedidos a Medida — Ruma Home</title>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="crm.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+
+<!-- PANTALLA DE ACCESO (login real contra Supabase Auth) -->
+<div id="gate-overlay" style="position:fixed; inset:0; background:#E8E6E1; z-index:9999; display:flex; align-items:center; justify-content:center;">
+    <div style="background:#F4F3F0; padding:40px; border-radius:6px; max-width:340px; width:90%; text-align:center; box-shadow:0 4px 20px rgba(0,0,0,0.08);">
+        <img src="logo-ruma.png" alt="Ruma Home" style="width:90px; height:90px; margin-bottom:16px;">
+        <h2 style="font-weight:300; letter-spacing:1px; margin-bottom:20px; font-family:'Montserrat',sans-serif;">PEDIDOS A MEDIDA</h2>
+        <input type="email" id="gate-email" placeholder="Email" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:10px; box-sizing:border-box; font-family:'Montserrat',sans-serif;">
+        <input type="password" id="gate-password" placeholder="Contraseña" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:4px; margin-bottom:12px; box-sizing:border-box; font-family:'Montserrat',sans-serif;" onkeydown="if(event.key==='Enter') intentarIngresar()">
+        <button id="gate-btn" onclick="intentarIngresar()" style="width:100%; padding:10px; background:#333; color:#fff; border:none; border-radius:4px; cursor:pointer; font-family:'Montserrat',sans-serif;">Ingresar</button>
+        <p id="gate-error" style="color:#B28B84; font-size:12px; margin-top:10px; display:none;">Email o contraseña incorrectos</p>
+    </div>
+</div>
+
+<header>
+    <div class="header-titulo">
+        <img src="logo-ruma.png" alt="Ruma Home" class="logo-header" width="46" height="46">
+        <h1>PEDIDOS A MEDIDA</h1>
+    </div>
+    <div class="header-actions">
+        <input type="text" id="buscador" placeholder="Buscar por cliente, modelo...">
+        <select id="filtro-tipo">
+            <option value="ALL">Todos los tipos</option>
+            <option value="sillon">Sillones</option>
+            <option value="mueble">Muebles a Medida</option>
+        </select>
+        <button class="btn-secundario" onclick="exportarBackupJSON()" title="Descarga todos los datos del CRM en un archivo. Sirve como respaldo o para pasarlo a otra computadora.">⬇ Backup</button>
+        <button class="btn-secundario" onclick="exportarPedidosCSV()" title="Descarga la lista de pedidos en un archivo para abrir en Excel.">⬇ CSV Pedidos</button>
+        <label class="btn-secundario" style="cursor:pointer;" title="Restaura un backup exportado antes. Reemplaza todos los datos actuales.">
+            ⬆ Importar<input type="file" accept=".json" style="display:none;" onchange="importarBackup(this)">
+        </label>
+        <button class="btn-secundario" onclick="descargarPlantillaImportacion()" title="Descarga una planilla vacía con las columnas que espera el importador.">⬇ Plantilla</button>
+        <label class="btn-secundario" style="cursor:pointer;" title="Carga pedidos desde un Excel o CSV que siga la plantilla.">
+            ⬆ Importar Excel<input type="file" accept=".xlsx,.xls,.csv" style="display:none;" onchange="importarPedidosExcel(this)">
+        </label>
+        <button class="btn-primario" onclick="abrirModalNuevoPedido()">+ Nuevo Pedido</button>
+        <button class="btn-secundario" onclick="cerrarSesion()" title="Cerrar sesión">Salir</button>
+    </div>
+</header>
+
+<main>
+    <div class="kpi-container" id="kpi-container">
+        <div class="kpi-card clickable" onclick="abrirDetalleKpi('activos')">
+            <h3>Pedidos Activos</h3>
+            <p id="kpi-activos">0</p>
+        </div>
+        <div class="kpi-card clickable" onclick="abrirDetalleKpi('activos')">
+            <h3>Valor en Pipeline <span class="hint-text">(pedidos activos)</span></h3>
+            <p id="kpi-valor-pipeline">$0</p>
+        </div>
+        <div class="kpi-card clickable" onclick="abrirDetalleKpi('saldo')">
+            <h3>Saldo Pendiente de Cobro</h3>
+            <p id="kpi-saldo-pendiente">$0</p>
+        </div>
+        <div class="kpi-card clickable" onclick="abrirDetalleKpi('atrasados')">
+            <h3>Entregas Atrasadas</h3>
+            <p id="kpi-atrasados" class="alerta-num">0</p>
+        </div>
+        <div class="kpi-card clickable" onclick="abrirDetalleKpi('recordatorios')">
+            <h3>Recordatorios Vencidos</h3>
+            <p id="kpi-recordatorios-vencidos" class="alerta-num">0</p>
+        </div>
+    </div>
+
+    <div class="tabs-container">
+        <button class="tab-btn active" onclick="cambiarVista('vista-pipeline')">Pipeline</button>
+        <button class="tab-btn" onclick="cambiarVista('vista-calendario')">Calendario</button>
+        <button class="tab-btn" onclick="cambiarVista('vista-clientes')">Clientes</button>
+        <button class="tab-btn" onclick="cambiarVista('vista-proveedores')">Proveedores</button>
+        <button class="tab-btn" onclick="cambiarVista('vista-entregas')">Próximas Entregas</button>
+        <button class="tab-btn" onclick="cambiarVista('vista-comercial')">Panel Comercial</button>
+        <button class="tab-btn" onclick="cambiarVista('vista-perdidos')">Perdidos</button>
+    </div>
+
+    <!-- PIPELINE (KANBAN) -->
+    <div id="vista-pipeline" class="vista-content">
+        <div class="kanban-board" id="kanban-board"></div>
+    </div>
+
+    <!-- CALENDARIO DE RECORDATORIOS -->
+    <div id="vista-calendario" class="vista-content" style="display:none;">
+        <div class="calendario-layout">
+            <div class="table-card">
+                <div class="calendario-header">
+                    <button class="btn-secundario" onclick="cambiarMesCalendario(-1)">‹ Anterior</button>
+                    <h3 id="calendario-titulo-mes"></h3>
+                    <button class="btn-secundario" onclick="cambiarMesCalendario(1)">Siguiente ›</button>
+                </div>
+                <div class="calendario-grid" id="calendario-grid"></div>
+            </div>
+            <div class="table-card">
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                    <h3>Agenda de Recordatorios</h3>
+                    <div style="display:flex; gap:8px;">
+                        <button class="btn-secundario" onclick="enviarResumenPorMail()">📧 Enviar Resumen por Mail</button>
+                        <button class="btn-secundario" onclick="abrirModalRecordatorioGeneral()">+ Nuevo</button>
+                    </div>
+                </div>
+                <p class="hint-text">Vencidos primero, después ordenados por fecha. Incluye pedidos y proveedores.</p>
+                <div id="lista-agenda" class="lista-agenda"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- CLIENTES -->
+    <div id="vista-clientes" class="vista-content" style="display:none;">
+        <div class="table-card">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <h3>Directorio de Clientes</h3>
+                <button class="btn-secundario" onclick="abrirModalCliente(null)">+ Nuevo Cliente</button>
+            </div>
+            <div class="table-responsive">
+                <table id="table-clientes">
+                    <thead><tr><th>Nombre</th><th>Contacto</th><th>Origen</th><th>Pedidos</th><th>Total Facturado</th><th></th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- PROVEEDORES -->
+    <div id="vista-proveedores" class="vista-content" style="display:none;">
+        <div class="table-card">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <h3>Directorio de Proveedores / Artesanos</h3>
+                <button class="btn-secundario" onclick="abrirModalProveedor(null)">+ Nuevo Proveedor</button>
+            </div>
+            <div class="table-responsive">
+                <table id="table-proveedores-dir">
+                    <thead><tr><th>Nombre</th><th>Especialidad</th><th>Contacto</th><th>Recordatorios pendientes</th><th></th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- PROXIMAS ENTREGAS -->
+    <div id="vista-entregas" class="vista-content" style="display:none;">
+        <div class="table-card">
+            <h3>Entregas Ordenadas por Fecha Estimada</h3>
+            <div class="table-responsive">
+                <table id="table-entregas">
+                    <thead><tr><th>Cliente</th><th>Producto</th><th>Etapa</th><th>Fecha Estimada</th><th>Saldo</th><th></th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- PANEL COMERCIAL -->
+    <div id="vista-comercial" class="vista-content" style="display:none;">
+        <div class="kpi-container">
+            <div class="kpi-card">
+                <h3>Tasa de Conversión</h3>
+                <p id="kpi-conversion">0%</p>
+                <p class="kpi-hint">Consultas que terminaron en venta</p>
+            </div>
+            <div class="kpi-card">
+                <h3>Ticket Promedio</h3>
+                <p id="kpi-ticket-crm">$0</p>
+            </div>
+            <div class="kpi-card">
+                <h3>Ganancia Acumulada</h3>
+                <p id="kpi-ganancia-crm">$0</p>
+                <p class="kpi-hint">Sobre pedidos entregados</p>
+            </div>
+        </div>
+        <div class="charts-container">
+            <div class="chart-card">
+                <h3>PEDIDOS POR MODELO / TIPO</h3>
+                <div class="chart-canvas-wrap"><canvas id="chartModelos"></canvas></div>
+            </div>
+            <div class="chart-card">
+                <h3>EMBUDO DE VENTAS</h3>
+                <div class="chart-canvas-wrap"><canvas id="chartEmbudo"></canvas></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- PERDIDOS -->
+    <div id="vista-perdidos" class="vista-content" style="display:none;">
+        <div class="table-card">
+            <h3>Pedidos Perdidos / Descartados</h3>
+            <div class="table-responsive">
+                <table id="table-perdidos">
+                    <thead><tr><th>Cliente</th><th>Producto</th><th>Motivo</th><th>Fecha</th><th></th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</main>
+
+<datalist id="clientes-datalist"></datalist>
+
+<!-- MODAL: NUEVO / EDITAR / DETALLE PEDIDO -->
+<div id="modal-pedido" class="modal-overlay" style="display:none;">
+    <div class="modal-box">
+        <div class="modal-header">
+            <h2 id="modal-titulo">Nuevo Pedido</h2>
+            <button class="modal-cerrar" onclick="cerrarModal()">×</button>
+        </div>
+        <div class="modal-body">
+
+            <div class="modal-tabs">
+                <button class="modal-tab-btn active" data-tab="tab-datos" onclick="cambiarTabModal('tab-datos')">Datos del Pedido</button>
+                <button class="modal-tab-btn" data-tab="tab-pagos" onclick="cambiarTabModal('tab-pagos')">Pagos</button>
+                <button class="modal-tab-btn" data-tab="tab-costos" onclick="cambiarTabModal('tab-costos')">Costos y Producción</button>
+                <button class="modal-tab-btn" data-tab="tab-seguimiento" onclick="cambiarTabModal('tab-seguimiento')">Seguimiento</button>
+                <button class="modal-tab-btn" data-tab="tab-fotos" onclick="cambiarTabModal('tab-fotos')">Fotos</button>
+            </div>
+
+            <!-- TAB: DATOS -->
+            <div id="tab-datos" class="modal-tab-content">
+                <div class="form-section-title">Cliente</div>
+                <div class="form-grid">
+                    <label>Nombre
+                        <input type="text" id="f-cliente-nombre" list="clientes-datalist" placeholder="Escribí o elegí uno existente" required>
+                    </label>
+                    <label>Teléfono / WhatsApp <input type="text" id="f-cliente-telefono" placeholder="Ej: 223 4123456"></label>
+                    <label>Email <input type="email" id="f-cliente-email"></label>
+                    <label>¿Cómo nos conoció?
+                        <select id="f-cliente-origen">
+                            <option value="">-</option>
+                            <option>Instagram</option>
+                            <option>Recomendación</option>
+                            <option>Local / Showroom</option>
+                            <option>Google</option>
+                            <option>Otro</option>
+                        </select>
+                    </label>
+                    <label class="full-width">Dirección de entrega <input type="text" id="f-cliente-direccion"></label>
+                </div>
+                <div id="whatsapp-btn-datos"></div>
+
+                <div class="form-section-title">Producto</div>
+                <div class="form-grid">
+                    <label>Tipo
+                        <select id="f-tipo" onchange="onCambioTipoProducto()">
+                            <option value="sillon">Sillón / Sofá</option>
+                            <option value="mueble">Mueble a Medida</option>
+                        </select>
+                    </label>
+
+                    <label id="campo-modelo-sillon">Modelo
+                        <select id="f-modelo-sillon">
+                            <option>NALA</option><option>CALI</option><option>SIMON</option><option>LEON</option><option>CHIQUI</option>
+                        </select>
+                    </label>
+                    <label id="campo-tela">Tela <input type="text" id="f-tela" placeholder="Ej: Panne, Donn, Thor"></label>
+                    <label id="campo-color">Color <input type="text" id="f-color"></label>
+                    <label id="campo-mt-tela">Metros de tela <input type="number" step="0.5" id="f-mt-tela"></label>
+                    <label id="campo-funda">Funda
+                        <select id="f-funda"><option value="no">No</option><option value="si">Sí</option></select>
+                    </label>
+                    <label id="campo-color-funda">Color de funda <input type="text" id="f-color-funda"></label>
+
+                    <label id="campo-tipo-mueble" style="display:none;">Tipo de mueble <input type="text" id="f-tipo-mueble" placeholder="Ej: Mesa ratona, Rack, Cómoda"></label>
+                    <label id="campo-madera" style="display:none;">Madera
+                        <select id="f-madera"><option>ALAMO</option><option>KIRI</option><option>PETIRIBI</option><option>PARAISO</option></select>
+                    </label>
+                    <label id="campo-terminacion" style="display:none;">Terminación <input type="text" id="f-terminacion" placeholder="Ej: Laqueado, Natural"></label>
+
+                    <label>Medidas <input type="text" id="f-medidas" placeholder="Ej: 2,00m x 1,00m o 120x60x45cm"></label>
+                    <label class="full-width">Detalles adicionales <textarea id="f-detalles" rows="2"></textarea></label>
+                </div>
+
+                <div class="form-section-title">Comercial</div>
+                <div class="form-grid">
+                    <label>Precio Total <input type="number" id="f-precio-total" step="1000"></label>
+                    <label>Etapa
+                        <select id="f-etapa">
+                            <option value="consulta">Consulta</option>
+                            <option value="presupuesto">Presupuesto Enviado</option>
+                            <option value="sena">Seña Confirmada</option>
+                            <option value="produccion">En Producción</option>
+                            <option value="listo">Listo para Entrega</option>
+                            <option value="entregado">Entregado</option>
+                        </select>
+                    </label>
+                    <label>Fecha de Consulta <input type="date" id="f-fecha-consulta"></label>
+                    <label>Fecha Estimada de Entrega <input type="date" id="f-fecha-estimada"></label>
+                    <label>Fecha Real de Entrega <input type="date" id="f-fecha-real"></label>
+                </div>
+            </div>
+
+            <!-- TAB: PAGOS -->
+            <div id="tab-pagos" class="modal-tab-content" style="display:none;">
+                <div class="resumen-financiero" id="resumen-pagos"></div>
+                <div class="form-section-title">Registrar Pago</div>
+                <div class="form-grid-inline">
+                    <input type="date" id="pago-fecha">
+                    <input type="number" id="pago-monto" placeholder="Monto">
+                    <select id="pago-medio"><option>Efectivo</option><option>Transferencia</option><option>Tarjeta</option><option>Otro</option></select>
+                    <button class="btn-secundario" onclick="agregarPago()">+ Agregar Pago</button>
+                </div>
+                <table class="tabla-sub" id="tabla-pagos"><thead><tr><th>Fecha</th><th>Monto</th><th>Medio</th><th></th></tr></thead><tbody></tbody></table>
+            </div>
+
+            <!-- TAB: COSTOS -->
+            <div id="tab-costos" class="modal-tab-content" style="display:none;">
+                <div class="resumen-financiero" id="resumen-costos"></div>
+                <div class="form-section-title">Registrar Costo</div>
+                <div class="form-grid-inline">
+                    <select id="costo-proveedor"><option value="">Sin proveedor asociado</option></select>
+                    <input type="text" id="costo-concepto" placeholder="Concepto (ej: Mano de obra, Tela)">
+                    <input type="number" id="costo-monto" placeholder="Monto">
+                    <button class="btn-secundario" onclick="agregarCosto()">+ Agregar Costo</button>
+                </div>
+                <table class="tabla-sub" id="tabla-costos"><thead><tr><th>Proveedor</th><th>Concepto</th><th>Monto</th><th></th></tr></thead><tbody></tbody></table>
+            </div>
+
+            <!-- TAB: SEGUIMIENTO -->
+            <div id="tab-seguimiento" class="modal-tab-content" style="display:none;">
+                <div class="form-section-title">Recordatorios de este Pedido</div>
+                <div class="form-grid-inline">
+                    <input type="date" id="recordatorio-fecha">
+                    <input type="text" id="recordatorio-texto" placeholder="Ej: Llamar para coordinar entrega" style="flex:2;">
+                    <button class="btn-secundario" onclick="agregarRecordatorioPedido()">+ Agregar</button>
+                </div>
+                <table class="tabla-sub" id="tabla-recordatorios-pedido"><thead><tr><th></th><th>Fecha</th><th>Recordatorio</th><th></th></tr></thead><tbody></tbody></table>
+
+                <div class="form-section-title">Historial de Notas</div>
+                <div class="form-grid-inline">
+                    <input type="text" id="nota-texto" placeholder="Agregar una nota..." style="flex:1;">
+                    <button class="btn-secundario" onclick="agregarNota()">+ Agregar</button>
+                </div>
+                <div id="lista-notas" class="lista-notas"></div>
+            </div>
+
+            <!-- TAB: FOTOS -->
+            <div id="tab-fotos" class="modal-tab-content" style="display:none;">
+                <div class="form-section-title">Fotos del Pedido</div>
+                <p class="hint-text" style="display:block; margin-bottom:12px;">Se comprimen automáticamente al subirlas para no ocupar demasiado espacio en el navegador.</p>
+                <input type="file" id="input-foto" accept="image/*" onchange="manejarSubidaFoto(this)">
+                <div id="galeria-fotos" class="galeria-fotos"></div>
+            </div>
+
+        </div>
+        <div class="modal-footer">
+            <button class="btn-peligro" id="btn-marcar-perdido" onclick="marcarComoPerdido()">Marcar como Perdido</button>
+            <div style="flex:1;"></div>
+            <button class="btn-secundario" onclick="cerrarModal()">Cancelar</button>
+            <button class="btn-primario" onclick="guardarPedido()">Guardar Pedido</button>
+        </div>
+    </div>
+</div>
+
+<!-- MODAL: CLIENTE -->
+<div id="modal-cliente" class="modal-overlay" style="display:none;">
+    <div class="modal-box modal-chico">
+        <div class="modal-header">
+            <h2 id="modal-cliente-titulo">Nuevo Cliente</h2>
+            <button class="modal-cerrar" onclick="cerrarModalCliente()">×</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-grid">
+                <label>Nombre <input type="text" id="c-nombre" required></label>
+                <label>Teléfono / WhatsApp <input type="text" id="c-telefono"></label>
+                <label>Email <input type="email" id="c-email"></label>
+                <label>¿Cómo nos conoció?
+                    <select id="c-origen"><option value="">-</option><option>Instagram</option><option>Recomendación</option><option>Local / Showroom</option><option>Google</option><option>Otro</option></select>
+                </label>
+                <label class="full-width">Dirección <input type="text" id="c-direccion"></label>
+            </div>
+            <div id="whatsapp-btn-cliente"></div>
+            <div class="form-section-title">Notas Generales del Cliente</div>
+            <div class="form-grid-inline">
+                <input type="text" id="c-nota-texto" placeholder="Agregar una nota..." style="flex:1;">
+                <button class="btn-secundario" onclick="agregarNotaCliente()">+ Agregar</button>
+            </div>
+            <div id="c-lista-notas" class="lista-notas"></div>
+            <div class="form-section-title">Pedidos de este Cliente</div>
+            <div id="c-lista-pedidos"></div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn-peligro" id="btn-borrar-cliente" onclick="borrarCliente()">Borrar Cliente</button>
+            <div style="flex:1;"></div>
+            <button class="btn-secundario" onclick="cerrarModalCliente()">Cancelar</button>
+            <button class="btn-primario" onclick="guardarCliente()">Guardar</button>
+        </div>
+    </div>
+</div>
+
+<!-- MODAL: PROVEEDOR -->
+<div id="modal-proveedor" class="modal-overlay" style="display:none;">
+    <div class="modal-box modal-chico">
+        <div class="modal-header">
+            <h2 id="modal-proveedor-titulo">Nuevo Proveedor</h2>
+            <button class="modal-cerrar" onclick="cerrarModalProveedor()">×</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-grid">
+                <label>Nombre <input type="text" id="pv-nombre" required></label>
+                <label>Especialidad
+                    <select id="pv-especialidad">
+                        <option>Tela / Tapicería</option>
+                        <option>Estructura de Sillón</option>
+                        <option>Madera / Muebles</option>
+                        <option>Transporte</option>
+                        <option>Otro</option>
+                    </select>
+                </label>
+                <label>Teléfono / WhatsApp <input type="text" id="pv-telefono"></label>
+                <label>Email <input type="email" id="pv-email"></label>
+                <label class="full-width">Notas <textarea id="pv-notas" rows="2"></textarea></label>
+            </div>
+            <div id="whatsapp-btn-proveedor"></div>
+            <div class="form-section-title">Recordatorios</div>
+            <div class="form-grid-inline">
+                <input type="date" id="pv-recordatorio-fecha">
+                <input type="text" id="pv-recordatorio-texto" placeholder="Ej: Pedirle la tela para el pedido de..." style="flex:2;">
+                <button class="btn-secundario" onclick="agregarRecordatorioProveedor()">+ Agregar</button>
+            </div>
+            <table class="tabla-sub" id="tabla-recordatorios-proveedor"><thead><tr><th></th><th>Fecha</th><th>Recordatorio</th><th></th></tr></thead><tbody></tbody></table>
+        </div>
+        <div class="modal-footer">
+            <button class="btn-peligro" id="btn-borrar-proveedor" onclick="borrarProveedor()">Borrar Proveedor</button>
+            <div style="flex:1;"></div>
+            <button class="btn-secundario" onclick="cerrarModalProveedor()">Cancelar</button>
+            <button class="btn-primario" onclick="guardarProveedor()">Guardar</button>
+        </div>
+    </div>
+</div>
+
+<!-- MODAL: RECORDATORIO GENERAL (no asociado a pedido/proveedor) -->
+<div id="modal-recordatorio-general" class="modal-overlay" style="display:none;">
+    <div class="modal-box modal-chico">
+        <div class="modal-header">
+            <h2>Nuevo Recordatorio</h2>
+            <button class="modal-cerrar" onclick="document.getElementById('modal-recordatorio-general').style.display='none';">×</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-grid">
+                <label>Fecha <input type="date" id="rg-fecha"></label>
+                <label>Vincular a <select id="rg-vinculo"><option value="">Sin vincular</option></select></label>
+                <label class="full-width">Texto <input type="text" id="rg-texto" placeholder="Ej: Llamar a proveedor de barniz"></label>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <div style="flex:1;"></div>
+            <button class="btn-secundario" onclick="document.getElementById('modal-recordatorio-general').style.display='none';">Cancelar</button>
+            <button class="btn-primario" onclick="guardarRecordatorioGeneral()">Guardar</button>
+        </div>
+    </div>
+</div>
+
+<!-- MODAL: DETALLE DE KPI -->
+<div id="modal-detalle-kpi" class="modal-overlay" style="display:none;">
+    <div class="modal-box">
+        <div class="modal-header">
+            <h2 id="detalle-kpi-titulo">Detalle</h2>
+            <button class="modal-cerrar" onclick="document.getElementById('modal-detalle-kpi').style.display='none';">×</button>
+        </div>
+        <div class="modal-body">
+            <p id="detalle-kpi-subtitulo" class="hint-text" style="display:block; margin-bottom:14px;"></p>
+            <div class="table-responsive">
+                <table id="detalle-kpi-tabla">
+                    <thead id="detalle-kpi-thead"></thead>
+                    <tbody id="detalle-kpi-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- LIGHTBOX FOTOS -->
+<div id="lightbox" class="modal-overlay" style="display:none;" onclick="cerrarLightbox()">
+    <img id="lightbox-img" src="" style="max-width:90vw; max-height:90vh; border-radius:6px;">
+</div>
+
+<script src="crm.js"></script>
+</body>
+</html>
