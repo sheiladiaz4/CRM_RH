@@ -354,7 +354,7 @@ window.abrirDetalleKpi = function(tipo) {
         thead.innerHTML = '<tr><th>Cliente</th><th>Teléfono</th><th>Pedidos con saldo</th><th>Saldo Total</th><th></th></tr>';
         tbody.innerHTML = filas.map(f => `
             <tr>
-                <td><strong>${f.cliente?.nombre || 'Sin cliente'}</strong></td>
+                <td><strong>${f.cliente?.nombre || 'Stock del local'}</strong></td>
                 <td>${f.cliente?.telefono || '-'}</td>
                 <td>${f.cantidad}</td>
                 <td>${formatearPlata(f.saldo)}</td>
@@ -445,11 +445,12 @@ function renderCard(p) {
     const saldo = calcularSaldo(p);
     const atrasado = estaAtrasado(p);
     const fechaTxt = p.fechaEstimada ? new Date(p.fechaEstimada + 'T00:00:00').toLocaleDateString('es-AR') : 'Sin fecha';
+    const nombreMostrar = cliente ? cliente.nombre : '<em>Stock del local</em>';
     return `
         <div class="kanban-card ${atrasado ? 'atrasado' : ''}" draggable="true"
              ondragstart="onDragStart(event, '${p.id}')" onclick="abrirModalEditar('${p.id}')">
             <div class="card-badge">${p.tipo === 'sillon' ? 'SILLÓN' : 'MUEBLE'}</div>
-            <div class="card-cliente">${cliente?.nombre || 'Sin nombre'}</div>
+            <div class="card-cliente">${nombreMostrar}</div>
             <div class="card-producto">${descripcionProducto(p)}</div>
             <div class="card-monto">${formatearPlata(p.precioTotal)}</div>
             ${saldo > 0 ? `<div class="card-saldo">Saldo: ${formatearPlata(saldo)}</div>` : ''}
@@ -611,6 +612,52 @@ function renderPedidosDeCliente(clienteId) {
     `).join('') || '<p class="hint-text">Todavía no tiene pedidos.</p>';
 }
 
+// Un pedido queda "asociado" a un proveedor si tiene al menos un costo cargado con
+// ese proveedor seleccionado (ej: "Mano de obra - Javier" con proveedorId = Javier).
+function pedidosDeProveedor(proveedorId) {
+    return pedidos.filter(p => (p.costos || []).some(c => c.proveedorId === proveedorId));
+}
+
+function renderPedidosDeProveedor(proveedorId) {
+    const cont = document.getElementById('pv-lista-pedidos');
+    if (!cont) return;
+    const pedidosProv = pedidosDeProveedor(proveedorId);
+
+    // "Cuánto nos debe" = pedidos que este proveedor todavía no terminó de entregar.
+    const enCurso = pedidosProv.filter(p => p.etapa !== 'entregado' && p.etapa !== 'perdido');
+
+    // Tiempo de fabricación: de la fecha de consulta a la fecha real de entrega,
+    // solo sobre pedidos ya entregados y con las dos fechas cargadas.
+    const entregadosConFechas = pedidosProv.filter(p => p.etapa === 'entregado' && p.fechaConsulta && p.fechaReal);
+    let tiempoPromedioTxt = 'Sin datos suficientes';
+    if (entregadosConFechas.length > 0) {
+        const promedioDias = entregadosConFechas.reduce((acc, p) => acc + (new Date(p.fechaReal) - new Date(p.fechaConsulta)) / 86400000, 0) / entregadosConFechas.length;
+        tiempoPromedioTxt = `${Math.round(promedioDias)} día(s) (sobre ${entregadosConFechas.length} entregado(s))`;
+    }
+
+    const resumenHtml = `
+        <div class="resumen-financiero" style="margin-bottom:14px;">
+            <div class="item"><span>Pedidos en curso</span><strong class="${enCurso.length > 0 ? 'negativo' : ''}">${enCurso.length}</strong></div>
+            <div class="item"><span>Pedidos totales</span><strong>${pedidosProv.length}</strong></div>
+            <div class="item"><span>Tiempo prom. de fabricación</span><strong style="font-size:13px;">${tiempoPromedioTxt}</strong></div>
+        </div>
+    `;
+
+    const listaHtml = pedidosProv.length ? pedidosProv.map(p => {
+        const cliente = getCliente(p.clienteId);
+        const etapaLabel = ETAPAS.find(e => e.key === p.etapa)?.label || p.etapa;
+        const fechaTxt = p.fechaEstimada ? new Date(p.fechaEstimada + 'T00:00:00').toLocaleDateString('es-AR') : 'Sin fecha estimada';
+        return `
+            <div class="mini-pedido-row">
+                <span>${cliente?.nombre || 'Stock del local'} — ${descripcionProducto(p)} · ${etapaLabel} · ${fechaTxt}</span>
+                <span class="link-abrir" onclick="cerrarModalProveedor(); abrirModalEditar('${p.id}')">Ver pedido</span>
+            </div>
+        `;
+    }).join('') : '<p class="hint-text">Todavía no tiene pedidos asociados (agregale un costo a un pedido para vincularlo).</p>';
+
+    cont.innerHTML = resumenHtml + listaHtml;
+}
+
 function renderNotasCliente() {
     document.getElementById('c-lista-notas').innerHTML = notasClienteTemp.slice().reverse().map(n => `
         <div class="nota-item"><div class="nota-fecha">${new Date(n.fecha).toLocaleString('es-AR')}</div><div>${n.texto}</div></div>
@@ -674,8 +721,19 @@ window.guardarCliente = async function() {
 
 window.borrarCliente = async function() {
     if (!clienteEnEdicion) return;
-    if (pedidos.some(p => p.clienteId === clienteEnEdicion)) { alert('Este cliente tiene pedidos asociados; no se puede borrar mientras los tenga.'); return; }
-    if (!confirm('¿Seguro que querés borrar este cliente?')) return;
+    const pedidosDelCliente = pedidos.filter(p => p.clienteId === clienteEnEdicion);
+
+    const mensaje = pedidosDelCliente.length > 0
+        ? `Este cliente tiene ${pedidosDelCliente.length} pedido(s) asociado(s). Si confirmás, también se van a borrar esos pedidos — no se puede deshacer. ¿Continuar?`
+        : '¿Seguro que querés borrar este cliente?';
+    if (!confirm(mensaje)) return;
+
+    if (pedidosDelCliente.length > 0) {
+        const { error: errorPedidos } = await supabaseClient.from('pedidos').delete().in('id', pedidosDelCliente.map(p => p.id));
+        if (errorPedidos) { console.error(errorPedidos); alert('No se pudieron borrar los pedidos asociados. Revisá la consola (F12).'); return; }
+        pedidos = pedidos.filter(p => p.clienteId !== clienteEnEdicion);
+    }
+
     const { error } = await supabaseClient.from('clientes').delete().eq('id', clienteEnEdicion);
     if (error) { console.error(error); alert('No se pudo borrar el cliente. Revisá la consola (F12).'); return; }
     clientes = clientes.filter(c => c.id !== clienteEnEdicion);
@@ -738,12 +796,14 @@ window.abrirModalProveedor = function(id) {
         document.getElementById('pv-notas').value = pv.notas || '';
         recordatoriosProveedorTemp = [...(pv.recordatorios || [])];
         document.getElementById('btn-borrar-proveedor').style.display = 'inline-block';
+        renderPedidosDeProveedor(id);
     } else {
         document.getElementById('modal-proveedor-titulo').textContent = 'Nuevo Proveedor';
         ['pv-nombre', 'pv-telefono', 'pv-email', 'pv-notas'].forEach(i => document.getElementById(i).value = '');
         document.getElementById('pv-especialidad').value = 'Tela / Tapicería';
         recordatoriosProveedorTemp = [];
         document.getElementById('btn-borrar-proveedor').style.display = 'none';
+        document.getElementById('pv-lista-pedidos').innerHTML = '<p class="hint-text">Se va a poder ver acá una vez que tenga pedidos asociados (agregale un costo a un pedido para vincularlo a este proveedor).</p>';
     }
     renderTablaRecordatoriosProveedor();
     actualizarBotonWhatsapp('whatsapp-btn-proveedor', document.getElementById('pv-telefono').value, document.getElementById('pv-nombre').value);
@@ -798,7 +858,7 @@ function renderEntregas() {
         const etapaLabel = ETAPAS.find(e => e.key === p.etapa)?.label || p.etapa;
         return `
             <tr class="${atrasado ? 'fila-atrasada' : ''}">
-                <td><strong>${getCliente(p.clienteId)?.nombre || '-'}</strong></td>
+                <td><strong>${getCliente(p.clienteId)?.nombre || 'Stock del local'}</strong></td>
                 <td>${descripcionProducto(p)}</td>
                 <td>${etapaLabel}</td>
                 <td>${atrasado ? '⚠ ' : ''}${new Date(p.fechaEstimada + 'T00:00:00').toLocaleDateString('es-AR')}</td>
@@ -814,7 +874,7 @@ function renderPerdidos() {
     const perdidos = pedidos.filter(p => p.etapa === 'perdido');
     tbody.innerHTML = perdidos.map(p => `
         <tr>
-            <td><strong>${getCliente(p.clienteId)?.nombre || '-'}</strong></td>
+            <td><strong>${getCliente(p.clienteId)?.nombre || 'Stock del local'}</strong></td>
             <td>${descripcionProducto(p)}</td>
             <td>${p.motivoPerdida || '-'}</td>
             <td>${p.fechaPerdida ? new Date(p.fechaPerdida).toLocaleDateString('es-AR') : '-'}</td>
@@ -904,6 +964,14 @@ window.onCambioTipoProducto = function() {
     ['campo-tipo-mueble', 'campo-madera', 'campo-terminacion'].forEach(id => document.getElementById(id).style.display = esSillon ? 'none' : 'flex');
 };
 
+window.onCambioEsStock = function() {
+    const esStock = document.getElementById('f-es-stock').checked;
+    document.getElementById('bloque-cliente-campos').style.display = esStock ? 'none' : 'grid';
+    document.getElementById('nota-es-stock').style.display = esStock ? 'block' : 'none';
+    document.getElementById('whatsapp-btn-datos').style.display = esStock ? 'none' : 'block';
+    if (esStock) actualizarBotonWhatsapp('whatsapp-btn-datos', '', '');
+};
+
 window.abrirModalNuevoPedido = function() {
     pedidoEnEdicion = null;
     document.getElementById('modal-titulo').textContent = 'Nuevo Pedido';
@@ -937,6 +1005,8 @@ function limpiarFormulario() {
     document.getElementById('f-funda').value = 'no';
     document.getElementById('f-etapa').value = 'consulta';
     document.getElementById('f-fecha-consulta').value = new Date().toISOString().substring(0, 10);
+    document.getElementById('f-es-stock').checked = false;
+    onCambioEsStock();
     onCambioTipoProducto();
     populateProveedorSelect();
     actualizarBotonWhatsapp('whatsapp-btn-datos', '', '');
@@ -956,6 +1026,8 @@ function cargarFormulario(p) {
     document.getElementById('f-cliente-email').value = cliente.email || '';
     document.getElementById('f-cliente-direccion').value = cliente.direccion || '';
     document.getElementById('f-cliente-origen').value = cliente.origen || '';
+    document.getElementById('f-es-stock').checked = !p.clienteId;
+    onCambioEsStock();
     actualizarBotonWhatsapp('whatsapp-btn-datos', cliente.telefono, cliente.nombre);
 
     document.getElementById('f-tipo').value = p.tipo || 'sillon';
@@ -1161,9 +1233,14 @@ function resolverClienteDesdeFormularioPedido() {
 
 window.guardarPedido = async function() {
     const nombre = document.getElementById('f-cliente-nombre').value.trim();
-    if (!nombre) { alert('El nombre del cliente es obligatorio.'); cambiarTabModalDirecto('tab-datos'); return; }
+    const esStock = document.getElementById('f-es-stock').checked;
+    if (!nombre && !esStock) {
+        alert('El nombre del cliente es obligatorio (o marcá "Es para stock del local" si todavía no tiene cliente).');
+        cambiarTabModalDirecto('tab-datos');
+        return;
+    }
 
-    const clienteId = resolverClienteDesdeFormularioPedido();
+    const clienteId = nombre ? resolverClienteDesdeFormularioPedido() : null;
     const datos = {
         clienteId, tipo: document.getElementById('f-tipo').value,
         modelo: document.getElementById('f-modelo-sillon').value,
